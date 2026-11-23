@@ -1,18 +1,4 @@
-"""
-gui.py - Modern Tkinter front-end for the Connect 4 minimax agent (Human vs Computer).
 
-Run:  python gui.py
-
-Structure
-  Helpers / widgets : rrect, draw_disc, Button, Segmented, Stepper, Toggle
-  BoardCanvas       : glossy board, hover column, bouncing drop animation,
-                      last-move marker, pulsing winning discs, column numbers
-  SetupView         : game configuration (algorithm, K, board size, first move)
-  GameView          : board + player cards + AI insight tiles + minimax tree
-                      explorer with a board preview of the selected node
-The AI runs in a worker thread so the window never freezes.
-Keyboard: press 1..N to drop a disc in that column, T opens the tree window.
-"""
 import queue
 import random
 import threading
