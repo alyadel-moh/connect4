@@ -1,4 +1,3 @@
-
 import queue
 import random
 import threading
@@ -8,7 +7,7 @@ import tkinter.font as tkfont
 from tkinter import ttk
 
 from board import Board, HUMAN, AI
-from minimax import choose_move, format_tree, INF
+from minimax import choose_move, format_tree, outcomes, INF
 
 # ----------------------------------------------------------------------------
 # Theme
@@ -423,6 +422,18 @@ def fmt_inf(x):
     return "-inf" if x == -INF else "+inf" if x == INF else f"{x:g}"
 
 
+def kind_name(n):
+    """Label for a search-tree node: CHANCE / LEAF / MAX / MIN."""
+    if n.kind == "chance":
+        return "CHANCE"
+    return "LEAF" if n.leaf else "MAX" if n.is_max else "MIN"
+
+
+def step_path(path, ch):
+    """Moves along the tree path. A chance node adds no move: its landing child does."""
+    return path if ch.kind == "chance" else path + [ch.move]
+
+
 # ----------------------------------------------------------------------------
 # Setup screen
 # ----------------------------------------------------------------------------
@@ -467,7 +478,8 @@ class SetupView(tk.Frame):
         box = card(right)
         box.pack(fill="x")
         self._row(box, "Algorithm", "How the computer searches",
-                  lambda p: Segmented(p, [("Minimax", "minimax"), ("Alpha-Beta", "alphabeta")], self.algo))
+                  lambda p: Segmented(p, [("Minimax", "minimax"), ("Alpha-Beta", "alphabeta"),
+                                          ("Expected", "expected")], self.algo, width=340))
         self._row(box, "Difficulty", "Quick presets for the depth K",
                   lambda p: Segmented(p, [("Easy", "easy"), ("Medium", "medium"), ("Hard", "hard")], self.preset))
         self._row(box, "Search depth (K)", "Levels explored before the cutoff",
@@ -530,12 +542,19 @@ class SetupView(tk.Frame):
             self.est.config(
                 text=f"Up to {leaves:,} leaf boards" + ("  -  heavy, may be slow!" if heavy else ""),
                 fg=AMBER if heavy else MUTED)
+        elif self.algo.get() == "expected":
+            heavy = self.k.get() > 4
+            self.est.config(
+                text="Expected minimax: each AI move adds a 3-way chance level"
+                     + ("  -  K > 4 may be very slow!" if heavy else ""),
+                fg=AMBER if heavy else MUTED)
         else:
             self.est.config(text=f"Up to {leaves:,} leaf boards  -  pruning usually visits far fewer",
                             fg=MUTED)
 
     def _start(self):
-        self.on_start(dict(alpha_beta=self.algo.get() == "alphabeta", k=self.k.get(),
+        self.on_start(dict(alpha_beta=self.algo.get() == "alphabeta",
+                           expected=self.algo.get() == "expected", k=self.k.get(),
                            rows=self.rows.get(), cols=self.cols.get(),
                            ai_first=self.first.get() == "ai", print_tree=self.print_tree.get()))
 
@@ -575,7 +594,9 @@ class SetupView(tk.Frame):
 class TreeViewer(tk.Toplevel):
     """Node-link diagram of the last AI search.
     Click a node to expand / collapse it, drag to pan, mouse wheel to scroll.
-    The chosen (principal) path is drawn in gold; cut-off branches are dashed."""
+    The chosen (principal) path is drawn in gold; cut-off branches are dashed.
+    In expected-minimax mode, CHANCE nodes (amber) sit after each AI move and
+    their children show the landing probability."""
     COLW, ROWH, BW = 158, 64, 122
     MAX_NODES = 1500
 
@@ -599,7 +620,7 @@ class TreeViewer(tk.Toplevel):
         self.note = tk.Label(bar, text="", bg=BG, fg=MUTED, font=F(9))
         self.note.pack(side="left", padx=14)
         for text, color in (("pruned", "#64748b"), ("chosen path", YELLOW), ("leaf", MUTED),
-                            ("MIN", ROSE), ("MAX", CYAN)):
+                            ("CHANCE", AMBER), ("MIN", ROSE), ("MAX", CYAN)):
             tk.Label(bar, text="\u25A0 " + text, bg=BG, fg=color, font=F(9, "bold")).pack(side="right", padx=6)
 
         body = tk.Frame(self, bg=BG)
@@ -674,6 +695,8 @@ class TreeViewer(tk.Toplevel):
     # ---- layout ----
     def _pv(self, n, is_root):
         """Child on the principal (chosen) path."""
+        if n.kind == "chance":
+            return n.children[0]                          # the aimed column (p = 0.6)
         for ch in n.children:
             if (ch.move == self.best_col) if is_root else (ch.value == n.value):
                 return ch
@@ -690,7 +713,7 @@ class TreeViewer(tk.Toplevel):
                 pv = self._pv(n, depth == 0) if best else None
                 ys = []
                 for ch in kids:
-                    ys.append(place(ch, depth + 1, path + [ch.move], best and ch is pv, e)["y"])
+                    ys.append(place(ch, depth + 1, step_path(path, ch), best and ch is pv, e)["y"])
                 if n.pruned_cols:
                     se = {"n": None, "d": depth + 1, "path": path, "best": False, "parent": e,
                           "y": slot[0] * self.ROWH, "stub": n.pruned_cols}
@@ -745,11 +768,13 @@ class TreeViewer(tk.Toplevel):
                                fill="#64748b", font=F(8))
                 continue
             root = n.move is None
-            color = ACCENT if root else MUTED if n.leaf else CYAN if n.is_max else ROSE
+            color = ACCENT if root else AMBER if n.kind == "chance" else MUTED if n.leaf \
+                else CYAN if n.is_max else ROSE
             rrect(cv, x1, y1, x2, y2, 10, fill="#1f2a5c" if n is self.selected else BG,
                   outline=YELLOW if e["best"] else color, width=3 if e["best"] else 2)
             head = "ROOT \u00b7 MAX" if root else \
-                f"col {n.move + 1} \u00b7 {'LEAF' if n.leaf else 'MAX' if n.is_max else 'MIN'}"
+                f"col {n.move + 1} \u00b7 {kind_name(n)}" + \
+                (f" \u00b7 p={n.prob:g}" if n.prob is not None else "")
             cv.create_text(x1 + 10, y1 + 12, text=head, anchor="w", fill=color, font=F(9, "bold"))
             cv.create_text(x1 + 10, y1 + 27, text=f"value  {fmt_inf(n.value)}", anchor="w",
                            fill=TEXT, font=F(10, "bold"))
@@ -810,9 +835,12 @@ class TreeViewer(tk.Toplevel):
         if n.move is None:
             self.sel_title.config(text=f"Root  (current position)   value {fmt_inf(n.value)}")
             self.sel_path.config(text="Computer to move.")
+        elif n.kind == "chance":
+            self.sel_title.config(text=f"col {n.move + 1} \u00b7 CHANCE   expected value {fmt_inf(n.value)}")
+            self.sel_path.config(text=f"AI aims at col {n.move + 1}; the disc may land in a "
+                                      "neighbouring column. Expand to see each outcome.")
         else:
-            kind = "LEAF" if n.leaf else "MAX" if n.is_max else "MIN"
-            self.sel_title.config(text=f"col {n.move + 1} \u00b7 {kind}   value {fmt_inf(n.value)}")
+            self.sel_title.config(text=f"col {n.move + 1} \u00b7 {kind_name(n)}   value {fmt_inf(n.value)}")
             self.sel_path.config(text="Moves: " + "  \u2192  ".join(str(c + 1) for c in path))
         self.sel_ab.config(text=f"\u03b1 = {fmt_inf(n.alpha)}    \u03b2 = {fmt_inf(n.beta)}"
                            if n.alpha is not None else "")
@@ -862,7 +890,8 @@ class GameView(tk.Frame):
         logo.pack(side="left")
         tk.Label(h, text="CONNECT 4", bg=BG, fg=TEXT, font=F(17, "bold")).pack(side="left", padx=(8, 18))
         cfg = self.cfg
-        for text in ("Alpha-Beta" if cfg["alpha_beta"] else "Minimax", f"K = {cfg['k']}",
+        for text in ("Expected" if cfg["expected"] else "Alpha-Beta" if cfg["alpha_beta"] else "Minimax",
+                     f"K = {cfg['k']}",
                      f"{cfg['rows']} \u00d7 {cfg['cols']}"):
             tk.Label(h, text=text, bg=CARD2, fg=TEXT, font=F(9, "bold"),
                      padx=10, pady=4).pack(side="left", padx=4)
@@ -936,7 +965,8 @@ class GameView(tk.Frame):
         self.tree.column("#0", width=210, minwidth=140)
         self.tree.column("value", width=70, anchor="e")
         self.tree.column("ab", width=110, anchor="center")
-        for tag, color in (("max", CYAN), ("min", ROSE), ("leaf", MUTED), ("prune", "#64748b")):
+        for tag, color in (("max", CYAN), ("min", ROSE), ("leaf", MUTED), ("chance", AMBER),
+                           ("prune", "#64748b")):
             self.tree.tag_configure(tag, foreground=color)
         self.tree.tag_configure("best", foreground=YELLOW, font=F(10, "bold"))
         sb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
@@ -1023,6 +1053,7 @@ class GameView(tk.Frame):
                 self.human_click(idx)
 
     def human_click(self, col):
+        # the human's disc always lands exactly in the clicked column
         if self.busy or self.over or not self.board.can_play(col):
             return
         self.busy = True
@@ -1046,14 +1077,14 @@ class GameView(tk.Frame):
         self.canvas.refresh(hover_color=None)
         snapshot = self.board.copy()
         self.tree_board = snapshot
-        k, ab = self.cfg["k"], self.cfg["alpha_beta"]
+        k, ab, ex = self.cfg["k"], self.cfg["alpha_beta"], self.cfg["expected"]
 
         def work():
             try:
-                self.q.put(choose_move(snapshot, k, ab))
-            except Exception as ex:                   # never leave the GUI hanging
+                self.q.put(choose_move(snapshot, k, ab, ex))
+            except Exception as exc:                  # never leave the GUI hanging
                 traceback.print_exc()
-                self.q.put(ex)
+                self.q.put(exc)
         threading.Thread(target=work, daemon=True).start()
         self.after(40, self._poll)
 
@@ -1076,20 +1107,28 @@ class GameView(tk.Frame):
         if self.viewer is not None and self.viewer.winfo_exists():
             self.viewer.set_data(*self.last_data)
         if self.cfg["print_tree"]:
-            name = "Alpha-Beta" if self.cfg["alpha_beta"] else "Minimax"
+            name = "Expected" if self.cfg["expected"] else \
+                "Alpha-Beta" if self.cfg["alpha_beta"] else "Minimax"
             print(f"\n===== AI turn | {name} | K={self.cfg['k']} | nodes={res.nodes} "
                   f"| {res.seconds * 1000:.1f} ms =====")
             print(format_tree(res.root, self.cfg["alpha_beta"]))
         self.set_status("Computer plays", YELLOW)
-        row = self.board.next_row(res.column)
+
+        land = res.column                                  # column the AI aimed at
+        if self.cfg["expected"]:                           # the disc may slip sideways
+            cols, probs = zip(*outcomes(self.board, res.column))
+            land = random.choices(cols, weights=probs)[0]
+            if self.cfg["print_tree"]:
+                print(f"AI aimed at col {res.column + 1}, disc landed in col {land + 1}")
+        row = self.board.next_row(land)
 
         def done():
             if not self.alive:
                 return
-            self.board.drop(res.column, AI)
-            self.last = (row, res.column)
+            self.board.drop(land, AI)
+            self.last = (row, land)
             self._after_move(AI)
-        self.canvas.animate_drop(res.column, row, YELLOW, done)
+        self.canvas.animate_drop(land, row, YELLOW, done)
 
     def _show_stats(self, res):
         t = self.tiles
@@ -1146,7 +1185,8 @@ class GameView(tk.Frame):
     def _label(n):
         if n.move is None:
             return "ROOT  (MAX)"
-        return f"col {n.move + 1}  ({'LEAF' if n.leaf else 'MAX' if n.is_max else 'MIN'})"
+        p = f", p={n.prob:g}" if n.prob is not None else ""
+        return f"col {n.move + 1}  ({kind_name(n)}{p})"
 
     def _insert(self, parent, n, path):
         text = self._label(n)
@@ -1155,7 +1195,7 @@ class GameView(tk.Frame):
         elif parent == self.root_iid and n.move == self.best_col and not self.star_done:
             self.star_done, tag, text = True, "best", "\u2605 " + text
         else:
-            tag = "leaf" if n.leaf else "max" if n.is_max else "min"
+            tag = "chance" if n.kind == "chance" else "leaf" if n.leaf else "max" if n.is_max else "min"
         ab = f"{fmt_inf(n.alpha)} / {fmt_inf(n.beta)}" if n.alpha is not None else ""
         iid = self.tree.insert(parent, "end", text=text, values=(f"{n.value:g}", ab), tags=(tag,))
         self.node_map[iid] = (n, path)
@@ -1177,7 +1217,7 @@ class GameView(tk.Frame):
             self.tree.delete(kids[0])
             n, path = self.node_map[iid]
             for ch in n.children:
-                self._insert(iid, ch, path + [ch.move])
+                self._insert(iid, ch, step_path(path, ch))
             if n.pruned_cols:
                 cols = ", ".join(str(c + 1) for c in n.pruned_cols)
                 self.tree.insert(iid, "end", text=f"\u2702 pruned cols [{cols}]",
@@ -1193,8 +1233,12 @@ class GameView(tk.Frame):
             b.drop(col, AI if i % 2 == 0 else HUMAN)
         self.preview.refresh(b)
         self.sel_title.config(text=f"{self._label(node)}   value {node.value:g}")
-        self.sel_path.config(text=("Moves: " + "  \u2192  ".join(str(c + 1) for c in path))
-                             if path else "Current position (root).")
+        if node.kind == "chance":
+            self.sel_path.config(text=f"AI aims at col {node.move + 1}; the disc may land in a "
+                                      "neighbouring column.")
+        else:
+            self.sel_path.config(text=("Moves: " + "  \u2192  ".join(str(c + 1) for c in path))
+                                 if path else "Current position (root).")
 
 
 # ----------------------------------------------------------------------------
